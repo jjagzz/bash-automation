@@ -1,32 +1,56 @@
 #!/usr/bin/env bash
-# Task 1 - Idempotent directory and file creation (basic version)
+# create_structure.sh - idempotent directory/file creation (refactored)
+# Usage: ./create_structure.sh [base_dir]     (default: ~/devops-lab)
+set -euo pipefail
 
-BASE_DIR="$HOME/devops-lab"
-TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/common.sh
+source "$SCRIPT_DIR/lib/common.sh"
+init_logging "create_structure"
 
-# -p = create parents as needed, and no error if it already exists
-mkdir -p "$BASE_DIR"/projects/app/{src,config,logs}
-mkdir -p "$BASE_DIR"/{backups,reports}
+usage() { echo "Usage: $0 [base_dir_inside_home]"; }
 
-# Static file: only create if missing, so re-runs never overwrite it
-CONFIG_FILE="$BASE_DIR/projects/app/config/app.conf"
-if [ ! -f "$CONFIG_FILE" ]; then
-    touch "$CONFIG_FILE"
-    echo "APP_NAME=demo-app" >> "$CONFIG_FILE"
-    echo "APP_ENV=development" >> "$CONFIG_FILE"
-    echo "Created: $CONFIG_FILE"
-else
-    echo "Skipped (already exists): $CONFIG_FILE"
-fi
+# create_dir <dir>
+create_dir() {
+    local dir="$1"
+    if [[ -d "$dir" ]]; then
+        log INFO "Exists:  $dir"
+    else
+        mkdir -p "$dir"
+        log INFO "Created: $dir"
+    fi
+}
 
-# Dynamic files: timestamp in the name, so every run adds a new one
-LOG_FILE="$BASE_DIR/projects/app/logs/app_${TIMESTAMP}.log"
-touch "$LOG_FILE"
-echo "Log started at $(date)" > "$LOG_FILE"
-echo "Created: $LOG_FILE"
+# create_file <path> <content>   (never overwrites an existing file)
+create_file() {
+    local file="$1" content="$2"
+    if [[ -f "$file" ]]; then
+        log INFO "Kept:    $file"
+        return 0
+    fi
+    touch "$file"
+    echo "$content" > "$file"
+    log INFO "Created: $file"
+}
 
-REPORT_FILE="$BASE_DIR/reports/report_${TIMESTAMP}.txt"
-echo "Report generated: $(date '+%F %T')" > "$REPORT_FILE"
-echo "Created: $REPORT_FILE"
+main() {
+    local base="${1:-$HOME/devops-lab}"
+    local ts
+    ts="$(date +%Y%m%d_%H%M%S)"
 
-echo "Done."
+    validate_safe_path "$base" || { usage; exit 2; }
+
+    create_dir "$base/projects/app/src"
+    create_dir "$base/projects/app/config"
+    create_dir "$base/projects/app/logs"
+    create_dir "$base/backups"
+    create_dir "$base/reports"
+
+    create_file "$base/projects/app/config/app.conf" "APP_NAME=demo-app"
+    create_file "$base/projects/app/logs/app_${ts}.log" "Log started $(date)"
+    create_file "$base/reports/report_${ts}.txt" "Report generated $(date '+%F %T')"
+
+    log INFO "Structure ready under $base"
+}
+
+main "$@"
