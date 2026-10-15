@@ -8,6 +8,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/lib/common.sh"
 init_logging "create_structure"
 
+trap 'log ERROR "Failed at line $LINENO (exit $?)"' ERR
+trap 'log WARN "Interrupted"; exit 130' INT TERM
+
 usage() { echo "Usage: $0 [base_dir_inside_home]"; }
 
 # create_dir <dir>
