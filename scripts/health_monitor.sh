@@ -1,47 +1,104 @@
 #!/usr/bin/env bash
-# Task 2 - System health monitor (basic version)
+# health_monitor.sh - system health check with thresholds, validation, cleanup
+# Usage: ./health_monitor.sh [disk_path] [threshold_percent]
+#   e.g. ./health_monitor.sh / 80
+# Exit codes: 0 healthy | 1 threshold exceeded | 2 bad input | 130 interrupted
+set -euo pipefail
 
-CPU_THRESHOLD=80
-MEM_THRESHOLD=80
-DISK_THRESHOLD=80
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/common.sh
+source "$SCRIPT_DIR/lib/common.sh"
+init_logging "health_monitor"
 
-# Capture system info into variables
-DISK_USAGE=$(df / | awk 'NR==2 {gsub("%",""); print $5}')
-MEM_USAGE=$(free | awk '/^Mem:/ {printf "%d", $3/$2*100}')
-LOAD=$(awk '{print $1}' /proc/loadavg)
-CORES=$(nproc)
-CPU_USAGE=$(awk -v l="$LOAD" -v c="$CORES" 'BEGIN {printf "%d", l/c*100}')
-PROC_COUNT=$(ps -e --no-headers | wc -l)
+REPORT_DIR="${REPORT_DIR:-$HOME/devops-lab/reports}"
+TMP_FILE=""
 
-echo "=== Health Report: $(date '+%F %T') ==="
-echo "Disk: ${DISK_USAGE}% | Memory: ${MEM_USAGE}% | CPU load: ${CPU_USAGE}% | Processes: $PROC_COUNT"
+# ---- trap handlers ----------------------------------------------------------
+cleanup() {
+    local code=$?                       # exit code of the script
+    if [[ -n "$TMP_FILE" && -f "$TMP_FILE" ]]; then
+        rm -f "$TMP_FILE"
+        log INFO "Removed temp file"
+    fi
+    log INFO "Exiting with code $code"
+    exit "$code"
+}
+trap cleanup EXIT                                        # runs on any exit
+trap 'log WARN "Interrupted by user"; exit 130' INT TERM # Ctrl+C / kill
 
-STATUS=0
+usage() { echo "Usage: $0 [disk_path] [threshold_percent]"; }
 
-if [ "$DISK_USAGE" -ge "$DISK_THRESHOLD" ]; then
-    echo "ALERT: disk usage high"; STATUS=1
-fi
-if [ "$MEM_USAGE" -ge "$MEM_THRESHOLD" ]; then
-    echo "ALERT: memory usage high"; STATUS=1
-fi
-if [ "$CPU_USAGE" -ge "$CPU_THRESHOLD" ]; then
-    echo "ALERT: CPU load high"; STATUS=1
-fi
+# ---- metric functions (print a number) --------------------------------------
+get_disk_usage() {     # $1 = path
+    df --output=pcent "$1" | tail -n 1 | tr -dc '0-9'
+}
+get_mem_usage() {
+    free | awk '/^Mem:/ {printf "%d", $3/$2*100}'
+}
+get_cpu_usage() {      # 1-min load average as % of core count
+    local load cores
+    load="$(awk '{print $1}' /proc/loadavg)"
+    cores="$(nproc)"
+    awk -v l="$load" -v c="$cores" 'BEGIN {printf "%d", l/c*100}'
+}
 
-echo "Top 5 processes by memory:"
-ps -eo pid,comm,%cpu,%mem --sort=-%mem | head -6
+main() {
+    local path="${1:-/}"
+    local limit="${2:-80}"
 
-# $? holds the exit code of the LAST command
-grep -q "processor" /proc/cpuinfo
-if [ $? -eq 0 ]; then
-    echo "CPU info check: OK"
-else
-    echo "CPU info check: FAILED"; STATUS=1
-fi
+    # ---- input validation ----
+    validate_dir_exists "$path" || { usage; exit 2; }
+    validate_percent "$limit"   || { usage; exit 2; }
 
-if [ "$STATUS" -eq 0 ]; then
-    echo "RESULT: system healthy"
-else
-    echo "RESULT: problems detected"
-fi
-exit "$STATUS"
+    mkdir -p "$REPORT_DIR"
+    TMP_FILE="$(mktemp)"
+    # Demo hook for testing the trap: DEMO_SLEEP=10 ./health_monitor.sh
+    sleep "${DEMO_SLEEP:-0}"
+
+    # ---- capture into variables ----
+    local disk mem cpu procs
+    disk="$(get_disk_usage "$path")"
+    mem="$(get_mem_usage)"
+    cpu="$(get_cpu_usage)"
+    procs="$(ps -e --no-headers | wc -l)"
+
+    log INFO "Host: $(hostname) | Processes: $procs | Disk path: $path"
+
+    # ---- compare against thresholds, capture exit codes with $? ----
+    local status=0 rc=0
+
+    rc=0; check_threshold "Disk"   "$disk" "$limit" || rc=$?
+    if [[ $rc -ne 0 ]]; then status=1; fi
+
+    rc=0; check_threshold "Memory" "$mem"  "$limit" || rc=$?
+    if [[ $rc -ne 0 ]]; then status=1; fi
+
+    rc=0; check_threshold "CPU"    "$cpu"  "$limit" || rc=$?
+    if [[ $rc -ne 0 ]]; then status=1; fi
+
+    # ---- build the report in a temp file, then move into place ----
+    {
+        echo "=== Health Report $(date '+%F %T') ==="
+        echo "Disk($path)=${disk}%  Memory=${mem}%  CPU=${cpu}%  Threshold=${limit}%"
+        echo "--- Top 5 processes by memory ---"
+        ps -eo pid,comm,%cpu,%mem --sort=-%mem | head -n 6
+        echo "--- Disk overview ---"
+        df -h
+        echo "--- Memory ---"
+        free -h
+    } > "$TMP_FILE"
+
+    local report="$REPORT_DIR/health_$(date +%Y%m%d_%H%M%S).txt"
+    mv "$TMP_FILE" "$report"
+    TMP_FILE=""                         # moved, so nothing left to clean
+    log INFO "Report saved: $report"
+
+    if [[ $status -eq 0 ]]; then
+        log INFO "RESULT: system healthy"
+    else
+        log ERROR "RESULT: one or more thresholds exceeded"
+    fi
+    return "$status"
+}
+
+main "$@"
